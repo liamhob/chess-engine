@@ -106,13 +106,15 @@ def play_cpp_game(
         if child.fifty_move_draw():
             if adjudicate_material:
                 mat_diff = compute_material_diff(np.asarray(child.planes(), dtype=np.float32))
-                persp = mat_diff if child.side_to_move() == 0 else -mat_diff
+                persp = mat_diff if child.side_to_move() == 1 else -mat_diff
                 val = 0.0 if abs(persp) < 1.0 else float(np.tanh(persp / 4.0))
                 return val, True
             return 0.0, True
         legal_values = list(child.legal_moves())
         if not legal_values:
-            return (-1.0 if child.in_check() else 0.0), True
+            # If child is in check with no legal moves, child was checkmated!
+            # The player who just moved won (+1.0)!
+            return (1.0 if child.in_check() else 0.0), True
         return 0.0, False
 
     def evaluate_batch(children: list[Any]):
@@ -189,7 +191,9 @@ def play_cpp_game(
                 else:
                     leaf_val = nn_val
 
-                evaluations[child_index] = (moves, priors, leaf_val, False)
+                # leaf_val is evaluated from child.side_to_move's perspective (the opponent).
+                # For the move that led to child, its value for the player who made it is -leaf_val!
+                evaluations[child_index] = (moves, priors, -leaf_val, False)
         return evaluations
 
     def evaluate(child: Any):
@@ -302,24 +306,36 @@ def play_cpp_match(
     seed: int,
     mcts_workers: int = 1,
     inference_batch_size: int = 16,
-    capture_prior_bonus: float = 1.0,
-    check_prior_bonus: float = 1.0,
+    capture_prior_bonus: float = 1.5,
+    check_prior_bonus: float = 1.2,
+    material_weight: float = 0.5,
     on_position: Any = None,
     on_game_end: Any = None,
 ) -> int:
     """Return +1 if candidate wins, -1 if it loses, 0 for a draw."""
-    return int(play_cpp_game(
-        candidate,
-        simulations=simulations,
-        max_plies=max_plies,
-        seed=seed,
-        temperature_moves=0,
-        mcts_workers=mcts_workers,
-        inference_batch_size=inference_batch_size,
-        capture_prior_bonus=capture_prior_bonus,
-        check_prior_bonus=check_prior_bonus,
-        opponent_model=incumbent,
-        return_outcome=True,
-        on_position=on_position,
-        on_game_end=on_game_end,
-    ))
+    raw_outcome = float(
+        play_cpp_game(
+            candidate,
+            simulations=simulations,
+            max_plies=max_plies,
+            seed=seed,
+            temperature_moves=0,
+            mcts_workers=mcts_workers,
+            inference_batch_size=inference_batch_size,
+            capture_prior_bonus=capture_prior_bonus,
+            check_prior_bonus=check_prior_bonus,
+            material_weight=material_weight,
+            dirichlet_alpha=0.0,
+            dirichlet_epsilon=0.0,
+            adjudicate_material=True,
+            opponent_model=incumbent,
+            return_outcome=True,
+            on_position=on_position,
+            on_game_end=on_game_end,
+        )
+    )
+    if raw_outcome > 0.25:
+        return 1
+    if raw_outcome < -0.25:
+        return -1
+    return 0

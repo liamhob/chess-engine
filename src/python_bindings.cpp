@@ -86,7 +86,7 @@ public:
             evaluation.moves = chess::generate_legal(position);
             if (evaluation.moves.empty()) {
                 evaluation.terminal = true;
-                evaluation.value = chess::is_in_check(position, position.side_to_move) ? -1.0F : 0.0F;
+                evaluation.value = chess::is_in_check(position, position.side_to_move) ? 1.0F : 0.0F;
                 return evaluation;
             }
             auto future = queue.submit(position);

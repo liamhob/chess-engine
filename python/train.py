@@ -329,6 +329,7 @@ def main() -> None:
                         args.seed + current_iteration * arena_games_to_play + arena_index,
                         mcts_workers=args.mcts_workers,
                         inference_batch_size=args.inference_batch_size,
+                        material_weight=args.material_weight,
                         on_position=report_arena_position if args.visualize_arena else None,
                         on_game_end=report_arena_end,
                     )

@@ -1172,7 +1172,9 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                             return [], [], 0.0, True
                         legals = list(child.legal_moves())
                         if not legals:
-                            val = -1.0 if child.in_check() else 0.0
+                            # Child has no legal moves. If child is in check, child was checkmated!
+                            # The player who just moved won (+1.0)!
+                            val = 1.0 if child.in_check() else 0.0
                             return [], [], val, True
                         frame = child.planes()
                         obs = encode_history(
@@ -1189,16 +1191,18 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                                 else None
                             )
                             mv = Move(m & 0x3F, (m >> 6) & 0x3F, promo)
-                            prior = float(log_pol[0, move_to_index(mv)].exp())
+                            nn_p = float(log_pol[0, move_to_index(mv)].exp())
+                            # Blend with uniform prior to guarantee exploration of all legal moves
+                            p = 0.5 * nn_p + 0.5 * (1.0 / len(legals))
                             if flag in {4, 5, 12, 13, 14, 15}:
-                                prior *= 1.5
-                            priors.append(prior)
+                                p *= 2.5
+                            priors.append(p)
                         tot = sum(priors)
                         priors = [p / tot for p in priors] if tot > 0 else [1.0 / len(legals)] * len(legals)
                         nn_val = float(val[0].item())
                         mat_val = compute_material_value(child)
-                        combined_val = 0.5 * nn_val + 0.5 * mat_val
-                        return legals, priors, combined_val, False
+                        move_val = -(0.5 * nn_val + 0.5 * mat_val)
+                        return legals, priors, move_val, False
 
                     search = alphazero_cpp.MCTS(state)
                     search.run(sims, evaluate)
