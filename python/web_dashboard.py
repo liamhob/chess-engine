@@ -194,6 +194,8 @@ def get_available_checkpoints():
                 label = "Latest Active Model"
             elif name == "model_best.pt":
                 label = "Best Promoted Model"
+            elif "legacy" in name or "inverted" in name:
+                label = "Trained Iteration 35 Model"
             ckpts.append({
                 "filename": name,
                 "label": label,
