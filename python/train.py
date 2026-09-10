@@ -59,6 +59,9 @@ def main() -> None:
     parser.add_argument("--arena-every", type=int, default=5)
     parser.add_argument("--arena-min-games", type=int, default=4)
     parser.add_argument("--visualize-arena", action="store_true", help="show arena boards")
+    parser.add_argument("--lr-decay-every", type=int, default=0, help="decay learning rate every N iterations (0 to disable)")
+    parser.add_argument("--lr-decay-factor", type=float, default=0.5, help="multiplicative factor for lr decay")
+    parser.add_argument("--material-decay", type=float, default=1.0, help="per-iteration multiplier for material weight (1.0 to disable)")
     args = parser.parse_args()
 
     if args.profile == "9070xt":
@@ -143,10 +146,12 @@ def main() -> None:
     model = AlphaZeroNet(residual_blocks=args.blocks, channels=args.channels)
     model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    start_iteration = 0
     if args.resume and args.checkpoint.exists():
         metadata = load_checkpoint(args.checkpoint, model, optimizer)
         start_iteration = metadata["iteration"]
+        for pg in optimizer.param_groups:
+            pg["lr"] = args.lr
+        print(f"Resumed from iteration {start_iteration} with lr={args.lr}", flush=True)
     if args.compile:
         if not hasattr(torch, "compile"):
             parser.error("this PyTorch build does not support torch.compile")
@@ -199,6 +204,7 @@ def main() -> None:
                     game_end["checks"] = move_stats.get("checks", 0)
                     game_end["quiet_moves"] = move_stats.get("quiet_moves", 0)
 
+                current_mat_weight = max(0.05, args.material_weight * (args.material_decay ** iteration))
                 try:
                     game_records = play_cpp_game(
                         model,
@@ -210,7 +216,7 @@ def main() -> None:
                         inference_batch_size=args.inference_batch_size,
                         capture_prior_bonus=args.capture_prior_bonus,
                         check_prior_bonus=args.check_prior_bonus,
-                        material_weight=args.material_weight,
+                        material_weight=current_mat_weight,
                         dirichlet_alpha=args.dirichlet_alpha,
                         dirichlet_epsilon=args.dirichlet_epsilon,
                         adjudicate_material=not args.no_adjudicate,
@@ -273,6 +279,10 @@ def main() -> None:
         loss = total_loss / steps
         arena = None
         current_iteration = iteration + 1
+        if args.lr_decay_every > 0 and current_iteration % args.lr_decay_every == 0:
+            for pg in optimizer.param_groups:
+                pg["lr"] *= args.lr_decay_factor
+            print(f"Decayed learning rate to: {optimizer.param_groups[0]['lr']:.6e}", flush=True)
         save_checkpoint(args.checkpoint, model, optimizer, current_iteration, args.seed)
         if current_iteration % 5 == 0:
             periodic_ckpt = args.checkpoint.with_name(
@@ -332,7 +342,7 @@ def main() -> None:
                         temperature_moves=4,
                         mcts_workers=args.mcts_workers,
                         inference_batch_size=args.inference_batch_size,
-                        material_weight=args.material_weight,
+                        material_weight=current_mat_weight,
                         on_position=report_arena_position if args.visualize_arena else None,
                         on_game_end=report_arena_end,
                     )
