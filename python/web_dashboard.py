@@ -27,6 +27,7 @@ from alphazero.network import AlphaZeroNet
 from alphazero.trainer import load_checkpoint
 from alphazero.observation import encode_history
 from alphazero.policy import Move, move_to_index
+from alphazero.cpp_selfplay import compute_material_value
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 LOADED_MODELS: dict[str, AlphaZeroNet] = {}
@@ -62,6 +63,7 @@ def move_to_uci(m: int) -> str:
 
 def build_state_from_moves(move_list: list[str]):
     state = alphazero_cpp.GameState()
+    counts = {state.hash(): 1}
     for uci in move_list:
         uci = uci.strip().lower()
         if not uci:
@@ -74,7 +76,13 @@ def build_state_from_moves(move_list: list[str]):
         if matched is None:
             raise ValueError(f"Illegal move in sequence: {uci}")
         state = state.apply(matched)
-    return state
+        h = state.hash()
+        counts[h] = counts.get(h, 0) + 1
+    return state, counts
+
+
+def is_repetition_draw(counts: dict[int, int]) -> bool:
+    return any(c >= 3 for c in counts.values())
 
 
 def get_local_ip() -> str:
@@ -1116,7 +1124,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             moves = req.get("moves", [])
             from_sq = req.get("from_square", "").lower()
             try:
-                state = build_state_from_moves(moves)
+                state, _ = build_state_from_moves(moves)
                 dests = []
                 for m in state.legal_moves():
                     uci = move_to_uci(m)
@@ -1137,12 +1145,18 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             ckpt = req.get("checkpoint", "model.pt")
             sims = int(req.get("simulations", 32))
             try:
-                state = build_state_from_moves(moves)
+                state, counts = build_state_from_moves(moves)
                 if not state.legal_moves():
                     res = {
                         "move": None,
                         "is_game_over": True,
                         "reason": "checkmate" if state.in_check() else "stalemate",
+                    }
+                elif is_repetition_draw(counts):
+                    res = {
+                        "move": None,
+                        "is_game_over": True,
+                        "reason": "threefold_repetition",
                     }
                 elif state.fifty_move_draw():
                     res = {
@@ -1175,10 +1189,16 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                                 else None
                             )
                             mv = Move(m & 0x3F, (m >> 6) & 0x3F, promo)
-                            priors.append(float(log_pol[0, move_to_index(mv)].exp()))
+                            prior = float(log_pol[0, move_to_index(mv)].exp())
+                            if flag in {4, 5, 12, 13, 14, 15}:
+                                prior *= 1.5
+                            priors.append(prior)
                         tot = sum(priors)
                         priors = [p / tot for p in priors] if tot > 0 else [1.0 / len(legals)] * len(legals)
-                        return legals, priors, float(val[0].item()), False
+                        nn_val = float(val[0].item())
+                        mat_val = compute_material_value(child)
+                        combined_val = 0.5 * nn_val + 0.5 * mat_val
+                        return legals, priors, combined_val, False
 
                     search = alphazero_cpp.MCTS(state)
                     search.run(sims, evaluate)
@@ -1187,19 +1207,24 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                     chosen_uci = move_to_uci(best_m)
 
                     next_state = state.apply(best_m)
-                    is_over = len(next_state.legal_moves()) == 0 or next_state.fifty_move_draw()
+                    counts[next_state.hash()] = counts.get(next_state.hash(), 0) + 1
+                    is_rep = counts[next_state.hash()] >= 3
+                    is_over = len(next_state.legal_moves()) == 0 or next_state.fifty_move_draw() or is_rep
                     reason = None
                     if is_over:
-                        if next_state.fifty_move_draw():
-                            reason = "fifty_move_draw"
-                        elif next_state.in_check():
+                        if next_state.in_check():
                             reason = "checkmate"
+                        elif is_rep:
+                            reason = "threefold_repetition"
+                        elif next_state.fifty_move_draw():
+                            reason = "fifty_move_draw"
                         else:
                             reason = "stalemate"
 
+                    eval_num = round(compute_material_value(state) * 5.0, 1)
                     res = {
                         "move": chosen_uci,
-                        "eval": 0.0,
+                        "eval": f"{'+' if eval_num > 0 else ''}{eval_num}",
                         "is_check": next_state.in_check(),
                         "is_game_over": is_over,
                         "reason": reason,

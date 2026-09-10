@@ -30,6 +30,28 @@ def _is_capture(value: int) -> bool:
     return _move_flag(value) in {4, 5, 12, 13, 14, 15}
 
 
+PIECE_WEIGHTS = np.array(
+    [1.0, 3.0, 3.2, 5.0, 9.0, 0.0, -1.0, -3.0, -3.2, -5.0, -9.0, 0.0],
+    dtype=np.float32,
+)
+
+
+def compute_material_diff(planes: np.ndarray) -> float:
+    """Compute White material minus Black material from piece planes 0..11."""
+    if planes.ndim == 3:
+        counts = planes[:12].sum(axis=(1, 2))
+        return float(np.dot(counts, PIECE_WEIGHTS))
+    counts = planes[:, :12].sum(axis=(2, 3))
+    return np.dot(counts, PIECE_WEIGHTS)
+
+
+def compute_material_value(child: Any) -> float:
+    """Return normalized material balance in [-1, 1] relative to child's side_to_move."""
+    diff = compute_material_diff(np.asarray(child.planes(), dtype=np.float32))
+    perspective_diff = diff if child.side_to_move() == 0 else -diff
+    return float(np.tanh(perspective_diff / 6.0))
+
+
 def play_cpp_game(
     model: torch.nn.Module,
     simulations: int = 64,
@@ -40,11 +62,15 @@ def play_cpp_game(
     inference_batch_size: int = 16,
     capture_prior_bonus: float = 1.0,
     check_prior_bonus: float = 1.0,
+    material_weight: float = 0.5,
+    dirichlet_alpha: float = 0.3,
+    dirichlet_epsilon: float = 0.25,
+    adjudicate_material: bool = True,
     on_position: Any = None,
     on_game_end: Any = None,
     opponent_model: torch.nn.Module | None = None,
     return_outcome: bool = False,
-) -> list[Experience]:
+) -> list[Experience] | float:
     import alphazero_cpp
 
     random_source = random.Random(seed)
@@ -52,6 +78,7 @@ def play_cpp_game(
     history: deque[np.ndarray] = deque(maxlen=8)
     records: list[tuple[np.ndarray, np.ndarray, int]] = []
     move_stats: Counter[str] = Counter()
+    position_counts: Counter[int] = Counter()
     model.eval()
     if opponent_model is not None:
         opponent_model.eval()
@@ -60,13 +87,15 @@ def play_cpp_game(
     if inference_batch_size <= 0:
         raise ValueError("inference_batch_size must be positive")
 
-    def finish(reason: str, outcome: int, ply_count: int):
+    def finish(reason: str, outcome: float, ply_count: int):
         if on_game_end is not None:
             on_game_end(reason, outcome, ply_count, len(records), dict(move_stats))
         if return_outcome:
             return outcome
-        return [Experience(observation, policy, float(outcome if side == 0 else -outcome))
-                for observation, policy, side in records]
+        return [
+            Experience(observation, policy, float(outcome if side == 0 else -outcome))
+            for observation, policy, side in records
+        ]
 
     def active_model_for(child: Any) -> torch.nn.Module:
         if child.side_to_move() == 1 and opponent_model is not None:
@@ -75,6 +104,11 @@ def play_cpp_game(
 
     def terminal_value(child: Any) -> tuple[float, bool]:
         if child.fifty_move_draw():
+            if adjudicate_material:
+                mat_diff = compute_material_diff(np.asarray(child.planes(), dtype=np.float32))
+                persp = mat_diff if child.side_to_move() == 0 else -mat_diff
+                val = 0.0 if abs(persp) < 1.0 else float(np.tanh(persp / 4.0))
+                return val, True
             return 0.0, True
         legal_values = list(child.legal_moves())
         if not legal_values:
@@ -102,9 +136,11 @@ def play_cpp_game(
             for child_index in child_indexes:
                 child = children[child_index]
                 frame = np.asarray(child.planes(), dtype=np.float32)
-                observations.append(encode_history(
-                    [frame], child.castling_rights(), child.side_to_move()
-                ))
+                observations.append(
+                    encode_history(
+                        [frame], child.castling_rights(), child.side_to_move()
+                    )
+                )
             observation_batch = torch.stack(observations).to(active_device)
             with torch.inference_mode(), torch.autocast(
                 device_type=active_device.type,
@@ -117,18 +153,43 @@ def play_cpp_game(
                 moves = legal_by_child[child_index]
                 priors = []
                 for value_move in moves:
-                    prior = float(log_policy_batch[row, move_to_index(_move_value(value_move))].exp())
+                    prior = float(
+                        log_policy_batch[
+                            row, move_to_index(_move_value(value_move))
+                        ].exp()
+                    )
                     if capture_prior_bonus != 1.0 and _is_capture(value_move):
                         prior *= capture_prior_bonus
                     if check_prior_bonus != 1.0 and child.apply(value_move).in_check():
                         prior *= check_prior_bonus
                     priors.append(prior)
+
+                # Root exploration noise (Dirichlet)
+                if (
+                    dirichlet_alpha > 0.0
+                    and child.hash() == state.hash()
+                    and len(moves) > 1
+                ):
+                    dir_noise = np.random.dirichlet([dirichlet_alpha] * len(moves))
+                    priors = [
+                        float((1.0 - dirichlet_epsilon) * p + dirichlet_epsilon * n)
+                        for p, n in zip(priors, dir_noise)
+                    ]
+
                 total = sum(priors)
                 if total <= 0.0:
                     priors = [1.0 / len(moves)] * len(moves)
                 else:
                     priors = [prior / total for prior in priors]
-                evaluations[child_index] = (moves, priors, float(value_batch[row].item()), False)
+
+                nn_val = float(value_batch[row].item())
+                if material_weight > 0.0:
+                    mat_val = compute_material_value(child)
+                    leaf_val = (1.0 - material_weight) * nn_val + material_weight * mat_val
+                else:
+                    leaf_val = nn_val
+
+                evaluations[child_index] = (moves, priors, leaf_val, False)
         return evaluations
 
     def evaluate(child: Any):
@@ -149,7 +210,9 @@ def play_cpp_game(
                     if not batch:
                         return
                     states = [state for _, state in batch]
-                    for (request_id, _), (_, priors, value, _) in zip(batch, evaluate_batch(states)):
+                    for (request_id, _), (_, priors, value, _) in zip(
+                        batch, evaluate_batch(states)
+                    ):
                         queue.respond(request_id, priors, value)
             except BaseException as error:
                 worker_error.append(error)
@@ -172,13 +235,31 @@ def play_cpp_game(
 
     ply = 0
     while max_plies is None or ply < max_plies:
+        # Check threefold repetition
+        curr_hash = state.hash()
+        position_counts[curr_hash] += 1
+        if position_counts[curr_hash] >= 3:
+            return finish("threefold_repetition", 0.0, ply)
+
         if state.fifty_move_draw():
-            return finish("fifty_move", 0, ply)
+            if adjudicate_material:
+                mat_diff = compute_material_diff(np.asarray(state.planes(), dtype=np.float32))
+                outcome = 0.0 if abs(mat_diff) < 1.0 else float(np.tanh(mat_diff / 4.0))
+                return finish("fifty_move", outcome, ply)
+            return finish("fifty_move", 0.0, ply)
+
         legal_values = list(state.legal_moves())
         if not legal_values:
-            outcome = -1 if state.in_check() and state.side_to_move() == 0 else 1 if state.in_check() else 0
+            outcome = -1.0 if state.in_check() and state.side_to_move() == 0 else 1.0 if state.in_check() else 0.0
             reason = "checkmate" if state.in_check() else "stalemate"
             return finish(reason, outcome, ply)
+
+        # Early adjudication on overwhelming material advantage (saving time on runaway games)
+        if adjudicate_material and ply >= 60:
+            mat_diff = compute_material_diff(np.asarray(state.planes(), dtype=np.float32))
+            if abs(mat_diff) >= 12.0:
+                outcome = 1.0 if mat_diff > 0 else -1.0
+                return finish("material_resignation", outcome, ply)
 
         frame = np.asarray(state.planes(), dtype=np.float32)
         observation = encode_history(
@@ -206,7 +287,11 @@ def play_cpp_game(
         state = next_state
         ply += 1
 
-    return finish("max_plies", 0, ply)
+    if adjudicate_material:
+        mat_diff = compute_material_diff(np.asarray(state.planes(), dtype=np.float32))
+        outcome = 0.0 if abs(mat_diff) < 1.0 else float(np.tanh(mat_diff / 4.0))
+        return finish("max_plies", outcome, ply)
+    return finish("max_plies", 0.0, ply)
 
 
 def play_cpp_match(

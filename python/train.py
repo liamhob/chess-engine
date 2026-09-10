@@ -36,10 +36,15 @@ def main() -> None:
     parser.add_argument("--simulations", type=int, default=64)
     parser.add_argument("--mcts-workers", type=int, default=4)
     parser.add_argument("--inference-batch-size", type=int, default=32)
-    parser.add_argument("--max-plies", type=int, default=0, help="hard ply cutoff; 0 disables the cutoff")
+    parser.add_argument("--max-plies", type=int, default=140, help="hard ply cutoff; 0 disables the cutoff")
     parser.add_argument("--temperature-moves", type=int, default=20)
-    parser.add_argument("--capture-prior-bonus", type=float, default=1.0, help="self-play prior multiplier for captures")
-    parser.add_argument("--check-prior-bonus", type=float, default=1.0, help="self-play prior multiplier for checking moves")
+    parser.add_argument("--capture-prior-bonus", type=float, default=1.5, help="self-play prior multiplier for captures")
+    parser.add_argument("--check-prior-bonus", type=float, default=1.2, help="self-play prior multiplier for checking moves")
+    parser.add_argument("--material-weight", type=float, default=0.5, help="blend ratio for material evaluation at MCTS leaves")
+    parser.add_argument("--dirichlet-alpha", type=float, default=0.3, help="Dirichlet noise alpha parameter at root")
+    parser.add_argument("--dirichlet-epsilon", type=float, default=0.25, help="Dirichlet noise mixing weight at root")
+    parser.add_argument("--train-steps", type=int, default=50, help="number of gradient steps per iteration")
+    parser.add_argument("--no-adjudicate", action="store_true", help="disable material adjudication on draws/cutoffs")
     parser.add_argument("--profile", choices=("default", "rtx4070", "9070xt"), default="default", help="hardware optimization profile")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda", "directml"), default="auto")
     parser.add_argument("--resume", action="store_true")
@@ -196,13 +201,19 @@ def main() -> None:
 
                 try:
                     game_records = play_cpp_game(
-                        model, simulations=args.simulations, max_plies=max_plies,
+                        model,
+                        simulations=args.simulations,
+                        max_plies=max_plies,
                         seed=args.seed + iteration * args.self_play_games + game_index,
                         temperature_moves=args.temperature_moves,
                         mcts_workers=args.mcts_workers,
                         inference_batch_size=args.inference_batch_size,
                         capture_prior_bonus=args.capture_prior_bonus,
                         check_prior_bonus=args.check_prior_bonus,
+                        material_weight=args.material_weight,
+                        dirichlet_alpha=args.dirichlet_alpha,
+                        dirichlet_epsilon=args.dirichlet_epsilon,
+                        adjudicate_material=not args.no_adjudicate,
                         on_position=report_position,
                         on_game_end=report_game_end,
                     )
@@ -253,9 +264,13 @@ def main() -> None:
                 recovery_path.unlink()
         if len(replay) < args.batch_size:
             parser.error(f"replay contains {len(replay)} positions; need {args.batch_size}")
-        loss = train_step(
-            model, optimizer, replay.sample(args.batch_size), device=device, amp=args.amp
-        )
+        total_loss = 0.0
+        steps = max(1, args.train_steps)
+        for _ in range(steps):
+            total_loss += train_step(
+                model, optimizer, replay.sample(args.batch_size), device=device, amp=args.amp
+            )
+        loss = total_loss / steps
         arena = None
         current_iteration = iteration + 1
         save_checkpoint(args.checkpoint, model, optimizer, current_iteration, args.seed)
