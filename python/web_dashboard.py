@@ -114,6 +114,8 @@ def parse_active_log(log_path: Path | None):
         "ply": None,
         "positions_per_sec": None,
         "recent_games": [],
+        "arena_recent": [],
+        "arena_summary": None,
         "raw_lines": [],
     }
     if not log_path or not log_path.exists():
@@ -135,6 +137,12 @@ def parse_active_log(log_path: Path | None):
         )
         end_pattern = re.compile(
             r"iteration=(\d+)\s+game=(\d+)/(\d+)\s+ended=(\w+)\s+plies=(\d+)\s+captures=(\d+)\s+checks=(\d+)\s+positions=(\d+)\s+positions_per_sec=([0-9.]+)"
+        )
+        arena_game_pattern = re.compile(
+            r"arena\s+game=(\d+)/(\d+)\s+result=(\w+)\s+ended=(\w+)\s+plies=(\d+)\s+captures=(\d+)\s+checks=(\d+)\s+running_score=([0-9-]+)\s+elapsed=([0-9.]+)s"
+        )
+        arena_summary_pattern = re.compile(
+            r"arena\s+games=(\d+)\s+wins=(\d+)\s+draws=(\d+)\s+losses=(\d+)\s+win_rate=([0-9.]+)\s+promoted=(True|False)\s+best=(\S+)"
         )
 
         for line in reversed(lines):
@@ -158,6 +166,32 @@ def parse_active_log(log_path: Path | None):
                     "checks": int(m_end.group(7)),
                     "positions_per_sec": float(m_end.group(9)),
                 })
+
+            m_ag = arena_game_pattern.search(line)
+            if m_ag and len(status["arena_recent"]) < 6:
+                status["arena_recent"].append({
+                    "game": int(m_ag.group(1)),
+                    "total_games": int(m_ag.group(2)),
+                    "result": m_ag.group(3),
+                    "reason": m_ag.group(4),
+                    "plies": int(m_ag.group(5)),
+                    "captures": int(m_ag.group(6)),
+                    "checks": int(m_ag.group(7)),
+                    "running_score": m_ag.group(8),
+                    "elapsed": float(m_ag.group(9)),
+                })
+
+            m_as = arena_summary_pattern.search(line)
+            if m_as and status["arena_summary"] is None:
+                status["arena_summary"] = {
+                    "games": int(m_as.group(1)),
+                    "wins": int(m_as.group(2)),
+                    "draws": int(m_as.group(3)),
+                    "losses": int(m_as.group(4)),
+                    "win_rate": float(m_as.group(5)),
+                    "promoted": m_as.group(6) == "True",
+                    "best": m_as.group(7),
+                }
     except Exception as e:
         status["error"] = str(e)
 
@@ -589,6 +623,28 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
+    <div id="arenaCard" style="display:none; margin-bottom: 24px;">
+      <div class="section-title">
+        <span>⚔️ Arena Benchmark (Candidate vs Incumbent)</span>
+        <span id="arenaStatusBadge" class="game-badge" style="background:rgba(56,189,248,0.2); color:#38bdf8;">Match Live</span>
+      </div>
+      <div class="grid" style="grid-template-columns: repeat(3, 1fr); margin-bottom: 8px;">
+        <div class="card" style="padding:10px 14px; border-color: rgba(16, 185, 129, 0.4);">
+          <div class="card-label">Candidate Wins</div>
+          <div class="card-val mono text-green" id="arenaWins">0</div>
+        </div>
+        <div class="card" style="padding:10px 14px; border-color: rgba(245, 158, 11, 0.4);">
+          <div class="card-label">Draws</div>
+          <div class="card-val mono" style="color:#f59e0b;" id="arenaDraws">0</div>
+        </div>
+        <div class="card" style="padding:10px 14px; border-color: rgba(239, 68, 68, 0.4);">
+          <div class="card-label">Incumbent Wins</div>
+          <div class="card-val mono" style="color:#ef4444;" id="arenaLosses">0</div>
+        </div>
+      </div>
+      <div class="games-list" id="arenaGamesList"></div>
+    </div>
+
     <div class="section-title">
       <span>Recent Games Completed</span>
       <button class="btn-action" onclick="fetchStatus()">Refresh</button>
@@ -810,6 +866,48 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <span class="game-badge ${g.reason}">${g.reason}</span>
           </div>
         `).join('');
+      }
+
+      // Arena Benchmark Live Updates
+      const arenaCard = document.getElementById('arenaCard');
+      const arenaRecent = (live.arena_recent && live.arena_recent.length > 0) ? live.arena_recent : [];
+      const arenaSummary = live.arena_summary;
+      if (arenaRecent.length > 0 || arenaSummary) {
+        arenaCard.style.display = 'block';
+        if (arenaSummary) {
+          document.getElementById('arenaWins').textContent = arenaSummary.wins;
+          document.getElementById('arenaDraws').textContent = arenaSummary.draws;
+          document.getElementById('arenaLosses').textContent = arenaSummary.losses;
+          const badge = document.getElementById('arenaStatusBadge');
+          if (arenaSummary.promoted) {
+            badge.textContent = 'PROMOTED (New Best Model)';
+            badge.style.background = 'rgba(16, 185, 129, 0.2)';
+            badge.style.color = '#10b981';
+          } else {
+            badge.textContent = `Win Rate: ${(arenaSummary.win_rate * 100).toFixed(0)}%`;
+            badge.style.background = 'rgba(56, 189, 248, 0.2)';
+            badge.style.color = '#38bdf8';
+          }
+        } else if (arenaRecent.length > 0) {
+          const last = arenaRecent[0];
+          const parts = (last.running_score || "0-0-0").split('-');
+          document.getElementById('arenaWins').textContent = parts[0] || '0';
+          document.getElementById('arenaDraws').textContent = parts[1] || '0';
+          document.getElementById('arenaLosses').textContent = parts[2] || '0';
+        }
+        if (arenaRecent.length > 0) {
+          document.getElementById('arenaGamesList').innerHTML = arenaRecent.map(g => `
+            <div class="game-item">
+              <div>
+                <span class="mono" style="font-weight:700;">Arena Game ${g.game}/${g.total_games}</span>
+                <div style="font-size:0.72rem; color:var(--text-dim); margin-top:2px;">
+                  ${g.plies} plies • ${g.captures} caps • ${g.checks} chks • Elapsed: ${g.elapsed}s
+                </div>
+              </div>
+              <span class="game-badge" style="font-weight:700; ${g.result === 'WIN' ? 'background:rgba(16,185,129,0.2); color:#10b981;' : g.result === 'LOSS' ? 'background:rgba(239,68,68,0.2); color:#ef4444;' : 'background:rgba(245,158,11,0.2); color:#f59e0b;'}">${g.result} (${g.reason})</span>
+            </div>
+          `).join('');
+        }
       }
 
       if (live.raw_lines && live.raw_lines.length > 0) {

@@ -56,8 +56,8 @@ def main() -> None:
     parser.add_argument("--progress-every", type=int, default=1, help="print self-play progress every N plies")
     parser.add_argument("--arena-games", type=int, default=0, help="evaluate against a frozen pre-update model")
     parser.add_argument("--arena-simulations", type=int, default=0)
-    parser.add_argument("--arena-every", type=int, default=10)
-    parser.add_argument("--arena-min-games", type=int, default=100)
+    parser.add_argument("--arena-every", type=int, default=5)
+    parser.add_argument("--arena-min-games", type=int, default=4)
     parser.add_argument("--visualize-arena", action="store_true", help="show arena boards")
     args = parser.parse_args()
 
