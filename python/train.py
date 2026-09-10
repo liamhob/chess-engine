@@ -259,6 +259,12 @@ def main() -> None:
         arena = None
         current_iteration = iteration + 1
         save_checkpoint(args.checkpoint, model, optimizer, current_iteration, args.seed)
+        if current_iteration % 5 == 0:
+            periodic_ckpt = args.checkpoint.with_name(
+                f"{args.checkpoint.stem}_iter_{current_iteration}{args.checkpoint.suffix}"
+            )
+            save_checkpoint(periodic_ckpt, model, optimizer, current_iteration, args.seed)
+            print(f"Saved 5-iteration checkpoint: {periodic_ckpt.name}", flush=True)
         boundary_due = args.arena_games > 0 and current_iteration % args.arena_every == 0
         boundary_checkpoint = args.checkpoint.with_name(
             f"{args.checkpoint.stem}_iter_{current_iteration}{args.checkpoint.suffix}"
