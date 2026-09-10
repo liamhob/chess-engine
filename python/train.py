@@ -40,11 +40,12 @@ def main() -> None:
     parser.add_argument("--temperature-moves", type=int, default=20)
     parser.add_argument("--capture-prior-bonus", type=float, default=1.0, help="self-play prior multiplier for captures")
     parser.add_argument("--check-prior-bonus", type=float, default=1.0, help="self-play prior multiplier for checking moves")
-    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    parser.add_argument("--profile", choices=("default", "rtx4070", "9070xt"), default="default", help="hardware optimization profile")
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda", "directml"), default="auto")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--visualize", action="store_true", help="show every self-play position")
     parser.add_argument("--visualize-delay", type=float, default=0.03)
-    parser.add_argument("--amp", action="store_true", help="use CUDA mixed precision")
+    parser.add_argument("--amp", action="store_true", help="use CUDA/ROCm mixed precision")
     parser.add_argument("--compile", action="store_true", help="compile the network with torch.compile")
     parser.add_argument("--metrics-file", type=Path, default=None, help="append JSONL metrics")
     parser.add_argument("--progress-every", type=int, default=1, help="print self-play progress every N plies")
@@ -54,6 +55,21 @@ def main() -> None:
     parser.add_argument("--arena-min-games", type=int, default=100)
     parser.add_argument("--visualize-arena", action="store_true", help="show arena boards")
     args = parser.parse_args()
+
+    if args.profile == "9070xt":
+        if args.mcts_workers == 4:
+            args.mcts_workers = 16
+        if args.inference_batch_size == 32:
+            args.inference_batch_size = 64
+        if args.batch_size == 128:
+            args.batch_size = 256
+        print(
+            "Configured optimized profile for AMD Radeon RX 9070 XT: "
+            f"mcts_workers={args.mcts_workers}, "
+            f"inference_batch_size={args.inference_batch_size}, "
+            f"training_batch_size={args.batch_size}",
+            flush=True,
+        )
 
     if args.iterations <= 0 or args.batch_size <= 0:
         parser.error("iterations and batch-size must be positive")
@@ -65,15 +81,39 @@ def main() -> None:
         parser.error("prior bonuses must be positive")
 
     torch.manual_seed(args.seed)
-    device = torch.device(
-        "cuda" if args.device == "auto" and torch.cuda.is_available() else
-        "cpu" if args.device == "auto" else args.device
-    )
-    if args.amp and device.type != "cuda":
-        parser.error("--amp requires a CUDA device")
+
+    def resolve_device(requested: str):
+        if requested == "cuda":
+            if not torch.cuda.is_available():
+                parser.error("CUDA/ROCm requested, but torch.cuda.is_available() is False")
+            return torch.device("cuda")
+        if requested == "directml":
+            try:
+                import torch_directml
+                return torch_directml.device()
+            except ImportError:
+                parser.error("DirectML requested, but 'torch-directml' is not installed. Run: pip install torch-directml")
+        if requested == "cpu":
+            return torch.device("cpu")
+        # auto detection:
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        try:
+            import torch_directml
+            print("Detected AMD GPU via DirectML hardware acceleration.", flush=True)
+            return torch_directml.device()
+        except ImportError:
+            pass
+        return torch.device("cpu")
+
+    device = resolve_device(args.device)
+    if args.amp and getattr(device, "type", str(device)) != "cuda":
+        print(f"--amp mixed precision is only supported on CUDA/ROCm; continuing without AMP on {device}.", flush=True)
+        args.amp = False
     if args.compile and sys.platform == "win32":
-        print("torch.compile is disabled on Windows without Triton; continuing with CUDA AMP.", flush=True)
+        print("torch.compile is disabled on Windows without Triton; continuing.", flush=True)
         args.compile = False
+
     replay = ReplayBuffer(capacity=args.capacity, seed=args.seed)
     if args.records.exists():
         try:

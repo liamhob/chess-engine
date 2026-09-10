@@ -18,11 +18,30 @@ Phase 5 is complete with a bounded 500,000-position replay buffer, deterministic
 
 The Windows bridge is generated as `build/Release/alphazero_cpp.cp311-win_amd64.pyd`.
 
-For the RTX 4070 environment, install the CUDA build explicitly:
+For the NVIDIA RTX 4070 environment:
 
 ```powershell
 python -m pip install -r requirements-cuda.txt
 ```
+
+For the AMD Radeon RX 9070 XT environment:
+
+- **Windows (DirectML via DirectX 12 hardware acceleration):**
+  ```powershell
+  python -m pip install -r requirements-amd.txt
+  ```
+- **Linux / WSL2 (AMD ROCm native):**
+  ```bash
+  pip install torch --index-url https://download.pytorch.org/whl/rocm6.2
+  pip install numpy pytest
+  ```
+
+Run with the optimized 9070 XT profile (16 parallel MCTS workers, batch size 64):
+
+```powershell
+python python/train.py --profile 9070xt --records data/experiences.npz --checkpoint checkpoints/model.pt --self-play-games 8 --simulations 32
+```
+
 
 ## Training from records
 

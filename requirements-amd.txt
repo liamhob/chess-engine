@@ -1,0 +1,12 @@
+# For AMD Radeon GPUs (e.g. Radeon RX 9070 XT)
+
+# --- Option A: Windows (DirectML via DirectX 12 hardware acceleration) ---
+# Install standard Python packages + Microsoft DirectML:
+# pip install -r requirements-amd.txt
+torch-directml>=0.2.0
+numpy>=1.26.0
+pytest>=8.0.0
+
+# --- Option B: Linux / Ubuntu / WSL2 (AMD ROCm native) ---
+# pip install torch --index-url https://download.pytorch.org/whl/rocm6.2
+# pip install numpy pytest
