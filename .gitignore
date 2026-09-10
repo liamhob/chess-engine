@@ -1,0 +1,34 @@
+# Build directories & compiled libraries
+build/
+build-codex/
+*.pyd
+*.so
+*.dll
+*.dylib
+*.exe
+*.obj
+*.lib
+*.exp
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# IDE / Editor
+.vscode/
+.idea/
+
+# Logs & Temporary files
+logs/*.log
+*.log
+scratch/
+
+# Data & Checkpoints (large binary training artifacts)
+# Use Git LFS or external storage if syncing model weights
+*.npz
+*.npz.corrupt
+*.npz.recovery.npz
+data/
+checkpoints/
