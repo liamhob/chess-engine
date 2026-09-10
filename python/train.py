@@ -324,9 +324,12 @@ def main() -> None:
                         arena_end["checks"] = move_stats.get("checks", 0)
                         arena_end["quiet_moves"] = move_stats.get("quiet_moves", 0)
 
+                    candidate_plays_white = (arena_index % 2 == 0)
                     outcome = play_cpp_match(
                         model, incumbent, arena_simulations, max_plies,
                         args.seed + current_iteration * arena_games_to_play + arena_index,
+                        candidate_plays_white=candidate_plays_white,
+                        temperature_moves=4,
                         mcts_workers=args.mcts_workers,
                         inference_batch_size=args.inference_batch_size,
                         material_weight=args.material_weight,

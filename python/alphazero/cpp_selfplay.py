@@ -304,6 +304,8 @@ def play_cpp_match(
     simulations: int,
     max_plies: int | None,
     seed: int,
+    candidate_plays_white: bool = True,
+    temperature_moves: int = 4,
     mcts_workers: int = 1,
     inference_batch_size: int = 16,
     capture_prior_bonus: float = 1.5,
@@ -312,14 +314,17 @@ def play_cpp_match(
     on_position: Any = None,
     on_game_end: Any = None,
 ) -> int:
-    """Return +1 if candidate wins, -1 if it loses, 0 for a draw."""
+    """Return +1 if candidate wins, -1 if candidate loses, 0 for a draw."""
+    white_model = candidate if candidate_plays_white else incumbent
+    black_model = incumbent if candidate_plays_white else candidate
+
     raw_outcome = float(
         play_cpp_game(
-            candidate,
+            white_model,
             simulations=simulations,
             max_plies=max_plies,
             seed=seed,
-            temperature_moves=0,
+            temperature_moves=temperature_moves,
             mcts_workers=mcts_workers,
             inference_batch_size=inference_batch_size,
             capture_prior_bonus=capture_prior_bonus,
@@ -328,14 +333,15 @@ def play_cpp_match(
             dirichlet_alpha=0.0,
             dirichlet_epsilon=0.0,
             adjudicate_material=True,
-            opponent_model=incumbent,
+            opponent_model=black_model,
             return_outcome=True,
             on_position=on_position,
             on_game_end=on_game_end,
         )
     )
-    if raw_outcome > 0.25:
+    candidate_outcome = raw_outcome if candidate_plays_white else -raw_outcome
+    if candidate_outcome > 0.25:
         return 1
-    if raw_outcome < -0.25:
+    if candidate_outcome < -0.25:
         return -1
     return 0
