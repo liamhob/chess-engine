@@ -1294,8 +1294,14 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                             nn_p = float(log_pol[0, move_to_index(mv)].exp())
                             # Blend with uniform prior to guarantee exploration of all legal moves
                             p = 0.5 * nn_p + 0.5 * (1.0 / len(legals))
-                            if flag in {4, 5, 12, 13, 14, 15}:
-                                p *= 2.5
+                            nxt_c = child.apply(m)
+                            if nxt_c.in_check():
+                                if not list(nxt_c.legal_moves()):
+                                    p *= 25.0  # Decisive checkmate boost
+                                else:
+                                    p *= 1.5   # Checking move boost
+                            elif flag in {4, 5, 12, 13, 14, 15}:
+                                p *= 2.0
                             priors.append(p)
                         tot = sum(priors)
                         priors = [p / tot for p in priors] if tot > 0 else [1.0 / len(legals)] * len(legals)
@@ -1304,10 +1310,21 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                         move_val = -(0.5 * nn_val + 0.5 * mat_val)
                         return legals, priors, move_val, False
 
-                    search = alphazero_cpp.MCTS(state)
-                    search.run(sims, evaluate)
-                    dist = search.visit_distribution()
-                    best_m = max(dist, key=lambda x: x[1])[0]
+                    # Check for immediate mate-in-1
+                    mate_move = None
+                    for m in state.legal_moves():
+                        nxt_s = state.apply(m)
+                        if nxt_s.in_check() and not list(nxt_s.legal_moves()):
+                            mate_move = m
+                            break
+
+                    if mate_move is not None:
+                        best_m = mate_move
+                    else:
+                        search = alphazero_cpp.MCTS(state)
+                        search.run(sims, evaluate)
+                        dist = search.visit_distribution()
+                        best_m = max(dist, key=lambda x: x[1])[0]
                     chosen_uci = move_to_uci(best_m)
 
                     next_state = state.apply(best_m)

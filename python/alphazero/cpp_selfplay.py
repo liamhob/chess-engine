@@ -160,10 +160,14 @@ def play_cpp_game(
                             row, move_to_index(_move_value(value_move))
                         ].exp()
                     )
-                    if capture_prior_bonus != 1.0 and _is_capture(value_move):
+                    nxt_state = child.apply(value_move)
+                    if nxt_state.in_check():
+                        if not list(nxt_state.legal_moves()):
+                            prior *= 25.0  # Decisive checkmate prior boost!
+                        elif check_prior_bonus != 1.0:
+                            prior *= check_prior_bonus
+                    elif capture_prior_bonus != 1.0 and _is_capture(value_move):
                         prior *= capture_prior_bonus
-                    if check_prior_bonus != 1.0 and child.apply(value_move).in_check():
-                        prior *= check_prior_bonus
                     priors.append(prior)
 
                 # Root exploration noise (Dirichlet)
@@ -258,10 +262,10 @@ def play_cpp_game(
             reason = "checkmate" if state.in_check() else "stalemate"
             return finish(reason, outcome, ply)
 
-        # Early adjudication on overwhelming material advantage (saving time on runaway games)
-        if adjudicate_material and ply >= 60:
+        # Only adjudicate runaway material at very late plies so models play out checkmates
+        if adjudicate_material and ply >= 120:
             mat_diff = compute_material_diff(np.asarray(state.planes(), dtype=np.float32))
-            if abs(mat_diff) >= 12.0:
+            if abs(mat_diff) >= 20.0:
                 outcome = 1.0 if mat_diff > 0 else -1.0
                 return finish("material_resignation", outcome, ply)
 
@@ -273,7 +277,18 @@ def play_cpp_game(
         run_search(search)
         policy = mcts_policy_target(search)
         distribution = list(search.visit_distribution())
-        if ply < temperature_moves:
+
+        # If any legal move delivers immediate checkmate, always pick it!
+        mate_move = None
+        for move_cand in legal_values:
+            cand_nxt = state.apply(move_cand)
+            if cand_nxt.in_check() and not list(cand_nxt.legal_moves()):
+                mate_move = move_cand
+                break
+
+        if mate_move is not None:
+            selected_value = mate_move
+        elif ply < temperature_moves:
             weights = [max(0, visits) for _, visits in distribution]
             selected_value = random_source.choices(
                 [value for value, _ in distribution], weights=weights
